@@ -35,8 +35,8 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   # 以下の2行を追記してください（インデントの半角スペース2個を揃える）
-  just_audio: ^0.9.43
-  audio_session: ^0.1.21
+  just_audio: ^0.10.5
+  audio_session: ^0.2.3
 
 dev_dependencies:
   flutter_test:

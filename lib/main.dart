@@ -8,11 +8,12 @@ void main() async {
   // Flutterの初期化を保証
   WidgetsFlutterBinding.ensureInitialized();
   
-  // YouTubeの音を止めないためのオーディオセッション設定
+  // バックグラウンド再生および他の音とのミックスを両立するオーディオセッション設定
   final session = await AudioSession.instance;
   await session.configure(AudioSessionConfiguration(
     avAudioSessionCategory: AVAudioSessionCategory.playback,
-    avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.mixWithOthers,
+    // mixWithOthers と duckOthers を組み合わせることで、裏で音楽が鳴っていても自分の音を小さく被せて鳴らせます
+    avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.mixWithOthers | AVAudioSessionCategoryOptions.duckOthers,
     androidAudioAttributes: const AndroidAudioAttributes(
       contentType: AndroidAudioContentType.music,
       usage: AndroidAudioUsage.media,
@@ -62,17 +63,27 @@ class _TimerScreenState extends State<TimerScreen> {
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   @override
+  void initState() {
+    super.initState();
+    // 起動時にプレイヤーがバックグラウンドに即座に対応できるよう初期化を促す
+    _audioPlayer.setLoopMode(LoopMode.off);
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
     _audioPlayer.dispose();
     super.dispose();
   }
 
-  // 音声を再生する関数（assetsに保存したパスを指定）
+  // 音声を再生する関数（バックグラウンド用に最適化）
   Future<void> _playSound(String fileName) async {
     try {
+      // 一度停止させてからロードし直して再生（連続再生時のバグ防止）
+      await _audioPlayer.stop();
       await _audioPlayer.setAsset('assets/audio/$fileName');
-      _audioPlayer.play();
+      // プレイは待機（await）せずに投げることで、タイマーのカウントダウンがズレるのを防ぎます
+      unawaited(_audioPlayer.play());
     } catch (e) {
       debugPrint("音声再生エラー: $e");
     }
@@ -121,7 +132,7 @@ class _TimerScreenState extends State<TimerScreen> {
       _timeLeft = _offSetting;
     });
 
-    // 1秒ごとに実行されるタイマー
+    // 1秒ごとに実行されるタイマー（バックグラウンドでも駆動）
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       _tick();
     });
@@ -141,6 +152,7 @@ class _TimerScreenState extends State<TimerScreen> {
 
   // 1秒ごとの処理（メインロジック）
   void _tick() {
+    // 残り秒数に応じたカウントダウン音
     if (_timeLeft == 4) _playSound('count3.mp3');
     if (_timeLeft == 3) _playSound('count2.mp3');
     if (_timeLeft == 2) _playSound('count1.mp3');
@@ -179,8 +191,6 @@ class _TimerScreenState extends State<TimerScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // 🔴【ここを書き換えました！】
-            // プラス・マイナスのボタンを廃止し、タップするとiOS風ピッカーが出るボタンに変更
             if (!_isRunning) ...[
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -193,7 +203,7 @@ class _TimerScreenState extends State<TimerScreen> {
                       decoration: BoxDecoration(
                         color: Colors.grey[850],
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.blue.withValues(alpha: 0.5)), // 👈 ここを書き換え
+                        border: Border.all(color: Colors.blue.withValues(alpha: 0.5)),
                       ),
                       child: Column(
                         children: [
@@ -215,7 +225,7 @@ class _TimerScreenState extends State<TimerScreen> {
                       decoration: BoxDecoration(
                         color: Colors.grey[850],
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.red.withValues(alpha: 0.5)), // 👈 ここを書き換え
+                        border: Border.all(color: Colors.red.withValues(alpha: 0.5)),
                       ),
                       child: Column(
                         children: [
