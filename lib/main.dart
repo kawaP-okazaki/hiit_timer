@@ -3,16 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
+// 通知プラグインの初期化
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 void main() async {
-  // Flutterの初期化を保証
   WidgetsFlutterBinding.ensureInitialized();
   
-  // バックグラウンド再生および他の音とのミックスを両立するオーディオセッション設定
+  // タイムゾーン（日本時間など）を初期化 👈 これを追加
+  tz.initializeTimeZones();
+  
+  // オーディオセッション設定
   final session = await AudioSession.instance;
   await session.configure(AudioSessionConfiguration(
     avAudioSessionCategory: AVAudioSessionCategory.playback,
-    // mixWithOthers と duckOthers を組み合わせることで、裏で音楽が鳴っていても自分の音を小さく被せて鳴らせます
     avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.mixWithOthers | AVAudioSessionCategoryOptions.duckOthers,
     androidAudioAttributes: const AndroidAudioAttributes(
       contentType: AndroidAudioContentType.music,
@@ -20,6 +28,17 @@ void main() async {
     ),
     androidAudioFocusGainType: AndroidAudioFocusGainType.gainTransientMayDuck,
   ));
+
+  // 通知の初期設定（iOS用）
+  const initializationSettingsIOS = DarwinInitializationSettings(
+    requestAlertPermission: true,
+    requestBadgePermission: true,
+    requestSoundPermission: true,
+  );
+  const initializationSettings = InitializationSettings(
+    iOS: initializationSettingsIOS,
+  );
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 
   runApp(const MyApp());
 }
@@ -32,7 +51,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'HIIT Interval Timer',
       theme: ThemeData(
-        brightness: Brightness.dark, // トレーニングアプリっぽくダークモードに
+        brightness: Brightness.dark,
         primarySwatch: Colors.blue,
       ),
       home: const TimerScreen(),
@@ -47,49 +66,119 @@ class TimerScreen extends StatefulWidget {
   State<TimerScreen> createState() => _TimerScreenState();
 }
 
-class _TimerScreenState extends State<TimerScreen> {
-  // 設定用の秒数（初期値）
+class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   int _offSetting = 10;
   int _onSetting = 30;
-
-  // 現在の状態管理
   int _timeLeft = 0;
-  bool _isOffTime = true; // true: OFFタイム, false: ONタイム
+  bool _isOffTime = true;
   bool _isRunning = false;
 
   Timer? _timer;
-  
-  // オーディオプレイヤー（just_audio）
   final AudioPlayer _audioPlayer = AudioPlayer();
+  DateTime? _backgroundTime;
 
   @override
   void initState() {
     super.initState();
-    // 起動時にプレイヤーがバックグラウンドに即座に対応できるよう初期化を促す
     _audioPlayer.setLoopMode(LoopMode.off);
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
     _timer?.cancel();
     _audioPlayer.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  // 音声を再生する関数（バックグラウンド用に最適化）
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_isRunning) return;
+
+    if (state == AppLifecycleState.paused) {
+      _backgroundTime = DateTime.now();
+      _timer?.cancel();
+      _scheduleBackgroundNotifications();
+    } else if (state == AppLifecycleState.resumed) {
+      flutterLocalNotificationsPlugin.cancelAll();
+      if (_backgroundTime != null) {
+        final elapsedSeconds = DateTime.now().difference(_backgroundTime!).inSeconds;
+        _handleBackgroundElapsed(elapsedSeconds);
+      }
+    }
+  }
+
+  void _handleBackgroundElapsed(int elapsedSeconds) {
+    int remaining = _timeLeft - elapsedSeconds;
+
+    while (remaining < 0) {
+      if (_isOffTime) {
+        _isOffTime = false;
+        remaining += _onSetting + 1;
+      } else {
+        _isOffTime = true;
+        remaining += _offSetting + 1;
+      }
+    }
+
+    setState(() {
+      _timeLeft = remaining;
+    });
+
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _tick();
+    });
+  }
+
+  // 🔴【エラーの起きていた通知予約処理を最新ルールに修正！】
+  void _scheduleBackgroundNotifications() async {
+    int tempTimeLeft = _timeLeft;
+    bool tempIsOffTime = _isOffTime;
+    int delay = 0;
+
+    // 現在の場所のローカルタイムゾーン（日本時間など）を取得
+    final String timeZoneName = tz.local.name;
+    final tz.Location location = tz.getLocation(timeZoneName);
+
+    for (int i = 0; i < 5; i++) {
+      delay += tempTimeLeft;
+      
+      final title = tempIsOffTime ? "ON TIME スタート！" : "OFF TIME スタート！";
+      final body = tempIsOffTime ? "限界まで追い込みましょう！" : "しっかり休憩してください。";
+
+      // 現時刻からdelay秒後の「TZDateTime」を正しく作成
+      final scheduledDate = tz.TZDateTime.now(location).add(Duration(seconds: delay));
+
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        i,
+        title,
+        body,
+        scheduledDate, // 👈 TZDateTime型に修正
+        const NotificationDetails(
+          iOS: DarwinNotificationDetails(presentSound: true, presentAlert: true),
+        ),
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime, // 👈 必須パラメータを追加
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle, // 👈 必須パラメータを追加
+        matchDateTimeComponents: DateTimeComponents.dateAndTime,
+      );
+
+      tempIsOffTime = !tempIsOffTime;
+      tempTimeLeft = tempIsOffTime ? _offSetting : _onSetting;
+    }
+  }
+
   Future<void> _playSound(String fileName) async {
     try {
-      // 一度停止させてからロードし直して再生（連続再生時のバグ防止）
       await _audioPlayer.stop();
       await _audioPlayer.setAsset('assets/audio/$fileName');
-      // プレイは待機（await）せずに投げることで、タイマーのカウントダウンがズレるのを防ぎます
       unawaited(_audioPlayer.play());
     } catch (e) {
       debugPrint("音声再生エラー: $e");
     }
   }
 
-  // iOS風のタイマー設定ピッカーを表示する関数
   void _showTimePicker({required bool isOffTime}) {
     showCupertinoModalPopup(
       context: context,
@@ -99,7 +188,7 @@ class _TimerScreenState extends State<TimerScreen> {
         child: SafeArea(
           top: false,
           child: CupertinoTimerPicker(
-            mode: CupertinoTimerPickerMode.ms, // 「分:秒」の選択モード
+            mode: CupertinoTimerPickerMode.ms,
             initialTimerDuration: Duration(
               seconds: isOffTime ? _offSetting : _onSetting,
             ),
@@ -120,39 +209,30 @@ class _TimerScreenState extends State<TimerScreen> {
     );
   }
 
-  // タイマー開始
   void _startTimer() {
     if (_isRunning) return;
-
     _playSound('ready.mp3');
-
     setState(() {
       _isRunning = true;
-      _isOffTime = true; // OFFタイムからスタート
+      _isOffTime = true;
       _timeLeft = _offSetting;
     });
-
-    // 1秒ごとに実行されるタイマー（バックグラウンドでも駆動）
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       _tick();
     });
   }
 
-  // タイマー停止
   void _stopTimer() {
     _timer?.cancel();
-
+    flutterLocalNotificationsPlugin.cancelAll();
     _playSound('finish.mp3');
-    
     setState(() {
       _isRunning = false;
       _timeLeft = 0;
     });
   }
 
-  // 1秒ごとの処理（メインロジック）
   void _tick() {
-    // 残り秒数に応じたカウントダウン音
     if (_timeLeft == 4) _playSound('count3.mp3');
     if (_timeLeft == 3) _playSound('count2.mp3');
     if (_timeLeft == 2) _playSound('count1.mp3');
@@ -175,7 +255,6 @@ class _TimerScreenState extends State<TimerScreen> {
     });
   }
 
-  // 「〇分〇秒」の形にきれいに表示するためのヘルパー関数
   String _formatDuration(int totalSeconds) {
     int minutes = totalSeconds ~/ 60;
     int seconds = totalSeconds % 60;
@@ -195,7 +274,6 @@ class _TimerScreenState extends State<TimerScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  // --- OFFタイム設定 ---
                   GestureDetector(
                     onTap: () => _showTimePicker(isOffTime: true),
                     child: Container(
@@ -217,7 +295,6 @@ class _TimerScreenState extends State<TimerScreen> {
                       ),
                     ),
                   ),
-                  // --- ONタイム設定 ---
                   GestureDetector(
                     onTap: () => _showTimePicker(isOffTime: false),
                     child: Container(
@@ -244,7 +321,6 @@ class _TimerScreenState extends State<TimerScreen> {
               const SizedBox(height: 60),
             ],
 
-            // 現在のステータス表示（実行中のみ）
             if (_isRunning) ...[
               Text(
                 _isOffTime ? "OFF TIME" : "ON TIME",
@@ -262,7 +338,6 @@ class _TimerScreenState extends State<TimerScreen> {
               const SizedBox(height: 60),
             ],
 
-            // 操作ボタン
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [

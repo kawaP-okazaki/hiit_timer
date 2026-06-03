@@ -74,5 +74,9 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>タイマーのアラーム通知に使用します</string>
+	<key>PermissionGroupNotification</key>
+	<string>タイマーの終了を通知するために必要です</string>
 </dict>
 </plist>
